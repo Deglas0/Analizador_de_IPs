@@ -1,0 +1,306 @@
+#O código estava divido em partes.
+# O nome do arquivo vai ser colocado antos do código
+
+#validation
+import re
+
+def teste_de_IPs(ip_informado):
+    padrao_ip = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+    if re.match(padrao_ip, ip_informado):
+        octetos = ip_informado.split('.')
+        if all(0 <= int(octeto) <= 255 for octeto in octetos):
+            if int(octetos[-1]) == 0:
+                return f'IP {ip_informado}: O último octeto não pode ser 0.'
+            elif ip_informado.startswith('127.'):
+                return f'IP {ip_informado}: 127.0.0.0 a 127.255.255.255 é reservado e não pode ser usado aqui.'
+            else:
+                return f'IP {ip_informado}: Parabéns por informar o IP correto'
+        else:
+            return f'IP {ip_informado}: IP informado não bate com o exigido pelo sistema'
+    else:
+        return f'IP {ip_informado}: IP informado não bate com o formato correto'
+
+#network
+import subprocess
+import os
+import sqlite3
+from database import DB_NAME, imprimir_ips
+
+def ping_ip(ip):
+    try:
+        ping_command = ["ping", "-n", "1", ip] if os.name == 'nt' else ["ping", "-c", "1", ip]
+        output = subprocess.check_output(ping_command, universal_newlines=True)
+        if "TTL=" in output:
+            return True
+        else:
+            return False
+    except subprocess.CalledProcessError:
+        return False
+
+def pingar_ips():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        query = "SELECT id, ip FROM dispositivos ORDER BY id"
+        cursor.execute(query)
+        dispositivos = cursor.fetchall()
+        for id, ip in dispositivos:
+            if not ping_ip(ip):
+                print(f"IP {ip} não está respondendo.")
+                cursor.execute("UPDATE dispositivos SET status = 'não respondendo' WHERE id = ?", (id,))
+            else:
+                cursor.execute("UPDATE dispositivos SET status = 'respondendo' WHERE id = ?", (id,))
+            conn.commit()
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+    # Imprimir IPs após pingar
+    imprimir_ips()
+
+#database
+import sqlite3
+from tabulate import tabulate
+
+DB_NAME = 'Teste_de_IPs.db'
+
+def criar_tabela():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS dispositivos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'desconhecido'
+    )
+    ''')
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def inserir_no_sqlite(nome_informado, ip_registrado):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        query = "INSERT INTO dispositivos (nome, ip, status) VALUES (?, ?, 'desconhecido')"
+        values = (nome_informado, ip_registrado)
+        cursor.execute(query, values)
+        conn.commit()
+        print(f"Dados inseridos: Nome = {nome_informado}, IP = {ip_registrado}")
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def imprimir_ips():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        query = "SELECT id, nome, ip, status FROM dispositivos"
+        cursor.execute(query)
+        ips = cursor.fetchall()
+        print("IPs cadastrados no banco de dados:")
+        print(tabulate(ips, headers=["ID", "Nome", "IP", "Status"], tablefmt="grid"))
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def deletar_ip(id_to_delete):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        delete_query = "DELETE FROM dispositivos WHERE id = ?"
+        cursor.execute(delete_query, (id_to_delete,))
+        conn.commit()
+        reorganizar_indices(cursor, conn)
+        print(f"Registro com ID {id_to_delete} deletado e índices reorganizados.")
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def reorganizar_indices(cursor, conn):
+    try:
+        cursor.execute('''
+        CREATE TABLE temp_dispositivos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            ip TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        ''')
+        cursor.execute('''
+        INSERT INTO temp_dispositivos (nome, ip, status)
+        SELECT nome, ip, status FROM dispositivos ORDER BY id
+        ''')
+        cursor.execute('DROP TABLE dispositivos')
+        cursor.execute('ALTER TABLE temp_dispositivos RENAME TO dispositivos')
+        conn.commit()
+    except sqlite3.Error as err:
+        print(f"Erro ao reorganizar os índices: {err}")
+        conn.rollback()
+
+# main
+import schedule
+import time
+import threading
+from database import criar_tabela, inserir_no_sqlite, imprimir_ips, deletar_ip
+from validation import teste_de_IPs
+from network import pingar_ips
+from camera import verificar_cameras
+from sms import verificar_erros_e_enviar_sms
+
+
+def indice_de_escolha(escolha):
+    match escolha:
+        case '1':
+            nome_informado = input('Informe o nome do aparelho: ')
+            ip_informado = input('Informe o IP: ')
+            resultado = teste_de_IPs(ip_informado)
+            print(resultado)
+            if "Parabéns por informar o IP correto" in resultado:
+                inserir_no_sqlite(nome_informado, ip_informado)
+            else:
+                print(f"O IP {ip_informado} não é válido e não foi inserido no banco de dados.")
+        case '2':
+            imprimir_ips()
+        case '3':
+            try:
+                id_to_delete = int(input('Informe o ID do IP a ser deletado: '))
+                deletar_ip(id_to_delete)
+            except ValueError:
+                print("ID inválido. Por favor, insira um número.")
+        case '4':
+            pingar_ips()  # Esta função já imprime os IPs após pingar
+        case '5':
+            verificar_cameras()
+        case 'x':
+            print("Fechando o menu de opções.")
+            return False
+
+
+def configuracao_inicial():
+    criar_tabela()
+    schedule.every(5).minutes.do(pingar_ips)
+    schedule.every(10).minutes.do(verificar_cameras)
+    schedule.every(10).minutes.do(verificar_erros_e_enviar_sms)
+
+
+def pingar_ips_em_segundo_plano():
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+
+def main():
+    configuracao_inicial()
+    thread_ping = threading.Thread(target=pingar_ips_em_segundo_plano)
+    thread_ping.daemon = True
+    thread_ping.start()
+
+    while True:
+        escolha = input('''
+Escolha uma opção:
+1- Adicionar IP novo
+2- Mostrar IPs adicionados
+3- Deletar IP por ID
+4- Ping todos os IPs cadastrados
+5- Verificar câmeras
+x- Fechar o menu de opções
+''')
+        if indice_de_escolha(escolha) == False:
+            break
+
+
+if __name__ == '__main__':
+    main()
+
+#sms
+import sqlite3
+from twilio.rest import Client
+from database import DB_NAME
+
+# Função para enviar SMS usando Twilio
+def send_sms_twilio(account_sid, auth_token, from_phone, to_phone, message):
+    client = Client(account_sid, auth_token)
+    message = client.messages.create(
+        body=message,
+        from_=from_phone,
+        to=to_phone
+    )
+    return message.sid
+
+def verificar_erros_e_enviar_sms():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        query = "SELECT id, nome, ip, status FROM dispositivos WHERE status = 'não respondendo'"
+        cursor.execute(query)
+        dispositivos = cursor.fetchall()
+
+        account_sid = 'SEU_TWILIO_ACCOUNT_SID'
+        auth_token = 'SEU_TWILIO_AUTH_TOKEN'
+        from_phone = 'SEU_TWILIO_PHONE_NUMBER'
+        to_phone = '+5511999999999'  # Número de telefone de destino
+
+        for id, nome, ip, status in dispositivos:
+            message = (
+                f"O aparelho com ID {id} de nome {nome} e IP {ip} apresentou erro: {status}"
+            )
+            sms_sid = send_sms_twilio(account_sid, auth_token, from_phone, to_phone, message)
+            print(f"SMS enviado com SID: {sms_sid} para o dispositivo com ID {id}.")
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+#camera
+import cv2
+import sqlite3
+import threading
+from database import DB_NAME
+
+def verificar_camera(ip):
+    cap = cv2.VideoCapture(f"http://{ip}/video")
+    if not cap.isOpened():
+        print(f"Não foi possível acessar a câmera com IP {ip}.")
+        return False
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print(f"Falha ao capturar imagem da câmera com IP {ip}.")
+        return False
+    print(f"Câmera com IP {ip} está transmitindo imagens.")
+    cap.release()
+    return True
+
+def verificar_cameras():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        query = "SELECT ip FROM dispositivos ORDER BY id"
+        cursor.execute(query)
+        ips = cursor.fetchall()
+        print("Verificando todas as câmeras cadastradas no banco de dados:")
+        threads = []
+        for (ip,) in ips:
+            thread = threading.Thread(target=verificar_camera, args=(ip,))
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+    except sqlite3.Error as err:
+        print(f"Erro: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
